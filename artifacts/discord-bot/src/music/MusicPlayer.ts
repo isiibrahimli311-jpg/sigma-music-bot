@@ -19,6 +19,8 @@ export enum LoopMode {
   Queue = 'queue',
 }
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 export class MusicPlayer {
   private connection: VoiceConnection | null = null;
   private player: AudioPlayer;
@@ -58,49 +60,74 @@ export class MusicPlayer {
     });
   }
 
-  async join(channel: VoiceBasedChannel): Promise<void> {
-    console.log(`[Voice] Joining channel "${channel.name}" in guild ${this.guildId}`);
-
-    this.connection = joinVoiceChannel({
+  private async attemptJoin(channel: VoiceBasedChannel): Promise<VoiceConnection> {
+    const conn = joinVoiceChannel({
       channelId: channel.id,
       guildId: this.guildId,
       adapterCreator: channel.guild.voiceAdapterCreator,
-      selfDeaf: true,
+      selfDeaf: false,
       selfMute: false,
     });
 
-    this.connection.on('stateChange', (oldState, newState) => {
+    conn.on('stateChange', (oldState, newState) => {
       console.log(`[Voice] State: ${oldState.status} → ${newState.status}`);
     });
 
-    this.connection.on('error', (err) => {
+    conn.on('error', (err) => {
       console.error('[Voice] Connection error:', err);
     });
 
     try {
-      await entersState(this.connection, VoiceConnectionStatus.Ready, 60_000);
+      await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
       console.log('[Voice] Connection ready!');
-      this.connection.subscribe(this.player);
+      return conn;
     } catch (err) {
-      const stuck = this.connection?.state.status ?? 'unknown';
-      console.error(`[Voice] Failed to reach Ready state (stuck at: ${stuck}):`, err);
-      this.connection.destroy();
-      this.connection = null;
-      throw new Error(`Voice connection failed (stuck at: ${stuck}). Make sure the bot has Connect & Speak permissions in that channel.`);
+      const stuck = conn.state.status;
+      console.warn(`[Voice] Attempt failed (stuck at: ${stuck}):`, (err as Error).message);
+      conn.destroy();
+      throw err;
+    }
+  }
+
+  async join(channel: VoiceBasedChannel): Promise<void> {
+    console.log(`[Voice] Joining channel "${channel.name}" in guild ${this.guildId}`);
+
+    const maxAttempts = 4;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
+        const delay = attempt * 2000;
+        console.log(`[Voice] Retry attempt ${attempt}/${maxAttempts} in ${delay / 1000}s...`);
+        await sleep(delay);
+      }
+
+      try {
+        this.connection = await this.attemptJoin(channel);
+        console.log(`[Voice] Connected on attempt ${attempt}`);
+
+        this.connection.on(VoiceConnectionStatus.Disconnected, () => {
+          void (async () => {
+            try {
+              await Promise.race([
+                entersState(this.connection!, VoiceConnectionStatus.Signalling, 5_000),
+                entersState(this.connection!, VoiceConnectionStatus.Connecting, 5_000),
+              ]);
+            } catch {
+              this.destroy();
+            }
+          })();
+        });
+
+        this.connection.subscribe(this.player);
+        return;
+      } catch (err) {
+        lastError = err as Error;
+      }
     }
 
-    this.connection.on(VoiceConnectionStatus.Disconnected, () => {
-      void (async () => {
-        try {
-          await Promise.race([
-            entersState(this.connection!, VoiceConnectionStatus.Signalling, 5_000),
-            entersState(this.connection!, VoiceConnectionStatus.Connecting, 5_000),
-          ]);
-        } catch {
-          this.destroy();
-        }
-      })();
-    });
+    this.connection = null;
+    throw new Error(`Voice connection failed after ${maxAttempts} attempts. Last error: ${lastError?.message}`);
   }
 
   async addTrack(track: Track): Promise<void> {
