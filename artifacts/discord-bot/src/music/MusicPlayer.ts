@@ -8,6 +8,7 @@ import {
   createAudioResource,
   entersState,
   joinVoiceChannel,
+  getVoiceConnection,
 } from '@discordjs/voice';
 import type { VoiceBasedChannel } from 'discord.js';
 import play from 'play-dl';
@@ -60,7 +61,17 @@ export class MusicPlayer {
     });
   }
 
-  private async attemptJoin(channel: VoiceBasedChannel): Promise<VoiceConnection> {
+  async join(channel: VoiceBasedChannel): Promise<void> {
+    console.log(`[Voice] Joining channel "${channel.name}" in guild ${this.guildId}`);
+
+    // Clean up any stale connection for this guild
+    const stale = getVoiceConnection(this.guildId);
+    if (stale) {
+      console.log('[Voice] Destroying stale connection before joining');
+      stale.destroy();
+      await sleep(500);
+    }
+
     const conn = joinVoiceChannel({
       channelId: channel.id,
       guildId: this.guildId,
@@ -69,65 +80,58 @@ export class MusicPlayer {
       selfMute: false,
     });
 
+    this.connection = conn;
+    let rejoinCount = 0;
+    const maxRejoins = 8;
+
     conn.on('stateChange', (oldState, newState) => {
       console.log(`[Voice] State: ${oldState.status} → ${newState.status}`);
+
+      // When we cycle back to signalling mid-connection, send a fresh join request
+      if (
+        oldState.status === VoiceConnectionStatus.Connecting &&
+        newState.status === VoiceConnectionStatus.Signalling
+      ) {
+        rejoinCount++;
+        console.log(`[Voice] Re-signalling (${rejoinCount}/${maxRejoins}) — sending rejoin`);
+        if (rejoinCount <= maxRejoins) {
+          conn.rejoin();
+        } else {
+          console.error('[Voice] Max rejoins exceeded, destroying connection');
+          conn.destroy();
+        }
+      }
     });
 
     conn.on('error', (err) => {
-      console.error('[Voice] Connection error:', err);
+      console.error('[Voice] Connection error:', err.message);
     });
 
     try {
-      await entersState(conn, VoiceConnectionStatus.Ready, 20_000);
+      await entersState(conn, VoiceConnectionStatus.Ready, 90_000);
       console.log('[Voice] Connection ready!');
-      return conn;
     } catch (err) {
       const stuck = conn.state.status;
-      console.warn(`[Voice] Attempt failed (stuck at: ${stuck}):`, (err as Error).message);
+      console.error(`[Voice] Failed to reach Ready (stuck at: ${stuck})`);
       conn.destroy();
-      throw err;
-    }
-  }
-
-  async join(channel: VoiceBasedChannel): Promise<void> {
-    console.log(`[Voice] Joining channel "${channel.name}" in guild ${this.guildId}`);
-
-    const maxAttempts = 4;
-    let lastError: Error | null = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (attempt > 1) {
-        const delay = attempt * 2000;
-        console.log(`[Voice] Retry attempt ${attempt}/${maxAttempts} in ${delay / 1000}s...`);
-        await sleep(delay);
-      }
-
-      try {
-        this.connection = await this.attemptJoin(channel);
-        console.log(`[Voice] Connected on attempt ${attempt}`);
-
-        this.connection.on(VoiceConnectionStatus.Disconnected, () => {
-          void (async () => {
-            try {
-              await Promise.race([
-                entersState(this.connection!, VoiceConnectionStatus.Signalling, 5_000),
-                entersState(this.connection!, VoiceConnectionStatus.Connecting, 5_000),
-              ]);
-            } catch {
-              this.destroy();
-            }
-          })();
-        });
-
-        this.connection.subscribe(this.player);
-        return;
-      } catch (err) {
-        lastError = err as Error;
-      }
+      this.connection = null;
+      throw new Error(`Could not connect to voice channel after ${maxRejoins} attempts. Try changing your voice channel's Region Override to "Automatic" in channel settings.`);
     }
 
-    this.connection = null;
-    throw new Error(`Voice connection failed after ${maxAttempts} attempts. Last error: ${lastError?.message}`);
+    conn.on(VoiceConnectionStatus.Disconnected, () => {
+      void (async () => {
+        try {
+          await Promise.race([
+            entersState(conn, VoiceConnectionStatus.Signalling, 5_000),
+            entersState(conn, VoiceConnectionStatus.Connecting, 5_000),
+          ]);
+        } catch {
+          this.destroy();
+        }
+      })();
+    });
+
+    conn.subscribe(this.player);
   }
 
   async addTrack(track: Track): Promise<void> {
@@ -202,34 +206,18 @@ export class MusicPlayer {
     }
   }
 
-  setLoop(mode: LoopMode): void {
-    this._loop = mode;
-  }
-
-  getLoop(): LoopMode {
-    return this._loop;
-  }
+  setLoop(mode: LoopMode): void { this._loop = mode; }
+  getLoop(): LoopMode { return this._loop; }
 
   setVolume(percent: number): void {
     this._volume = Math.max(0, Math.min(200, percent));
     this.currentResource?.volume?.setVolumeLogarithmic(this._volume / 100);
   }
 
-  getVolume(): number {
-    return this._volume;
-  }
-
-  getCurrentTrack(): Track | null {
-    return this.currentTrack;
-  }
-
-  getQueue(): Track[] {
-    return [...this.queue];
-  }
-
-  isPaused(): boolean {
-    return this._paused;
-  }
+  getVolume(): number { return this._volume; }
+  getCurrentTrack(): Track | null { return this.currentTrack; }
+  getQueue(): Track[] { return [...this.queue]; }
+  isPaused(): boolean { return this._paused; }
 
   isConnected(): boolean {
     return (
