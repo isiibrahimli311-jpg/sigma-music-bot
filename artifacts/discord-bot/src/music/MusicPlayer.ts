@@ -117,7 +117,9 @@ export class MusicPlayer {
     this.currentTrack = track;
 
     try {
-      const stream = await play.stream(track.url, { quality: 2 });
+      console.log(`[MusicPlayer] Streaming: ${track.title} | ${track.url}`);
+      const stream = await play.stream(track.url);
+      console.log(`[MusicPlayer] Stream type: ${stream.type}`);
       const resource = createAudioResource(stream.stream, {
         inputType: stream.type,
         inlineVolume: true,
@@ -125,6 +127,7 @@ export class MusicPlayer {
       resource.volume?.setVolumeLogarithmic(this._volume / 100);
       this.currentResource = resource;
       this.player.play(resource);
+      console.log(`[MusicPlayer] Playing: ${track.title}`);
     } catch (error) {
       console.error(`[MusicPlayer] Failed to stream "${track.title}":`, error);
       this.currentTrack = null;
