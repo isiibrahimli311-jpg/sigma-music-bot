@@ -1,0 +1,22 @@
+{
+  "name": "@workspace/discord-bot",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "discord.js": "^14.19.3",
+    "@discordjs/voice": "^0.18.0",
+    "play-dl": "^1.9.7",
+    "opusscript": "^0.0.8",
+    "libsodium-wrappers": "^0.7.15"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/libsodium-wrappers": "^0.7.14",
+    "tsx": "catalog:",
+    "typescript": "~5.9.3"
+  }
+}
